@@ -252,7 +252,7 @@ const fmtMY=d=>d.toLocaleDateString("es-CL",{month:"short",year:"numeric"}).repl
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const sumBy=(L,f=x=>x.monto)=>L.reduce((s,x)=>s+f(x),0);
 const optHtml=CAT_NAMES.map(c=>`<option>${c}</option>`).join("");
-let toastT;function toast(m){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("on"),1700)}
+let toastT;function toast(m,ms=1700){const t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("on"),ms)}
 
 // ---- Tema
 function applyTheme(){
@@ -297,6 +297,14 @@ function proxFact(){
   return d;
 }
 function primeraFact(g){return cuotasDe(g)[0].fecha}
+// Facturaciones agrupadas por fecha; cada abono a crédito rebaja las facturaciones posteriores a su fecha (en orden)
+function facturaciones(){
+  const m={};
+  gastos.filter(g=>g.pago==="Crédito").forEach(g=>cuotasDe(g).forEach(c=>{const k=+c.fecha;const s=m[k]=m[k]||{f:c.fecha,bruto:0,sin:0,cuo:0};s.bruto+=c.monto;if(c.n===1)s.sin+=c.monto;else s.cuo+=c.monto}));
+  const S=Object.values(m).sort((a,b)=>a.f-b.f);S.forEach(s=>s.neto=s.bruto);
+  abonos.filter(a=>a.pago==="Crédito").sort((a,b)=>a.ts-b.ts).forEach(a=>{let r=a.monto;for(const s of S){if(r<=0)break;if(+s.f<=a.ts||s.neto<=0)continue;const d=Math.min(r,s.neto);s.neto-=d;r-=d}});
+  return S;
+}
 
 // ---- Saldos
 function saldo(p){
@@ -304,6 +312,11 @@ function saldo(p){
   let s=c.base+sumBy(abonos.filter(a=>a.pago===p&&a.ts>=c.desde))-sumBy(gastos.filter(g=>g.pago===p&&g.ts>=c.desde));
   if(p==="Débito")s-=sumBy(abonos.filter(a=>a.dd&&a.ts>=c.desde));
   return s;
+}
+// Devuelve lo disponible si el movimiento dejaría el saldo negativo; null si está bien
+function faltante(p,ts,monto){
+  const c=cfg[p]; if(!c.set||ts<c.desde)return null;
+  const s=saldo(p); return s-monto<0?s:null;
 }
 function renderSaldos(){
   [["Débito","bdv","bds","disponible"],["Crédito","bcv","bcs","cupo disponible"]].forEach(([p,v,s,txt])=>{
@@ -373,9 +386,14 @@ function refreshPrev(){
     $("add").disabled=!(p.monto>0);
     if(p.monto>0){
       const t=payA==="Crédito"?"Pago de tarjeta":"Ingreso a débito";let x=` · ${money(p.monto)}`;
-      if(payA==="Crédito"){const sd=saldo("Débito");x+=sd===null?" · sale de Débito":` · débito quedará en ${money(sd-p.monto)}`}
+      if(payA==="Crédito"){
+        const sd=saldo("Débito"), fa=faltante("Débito",fechaSel().getTime(),p.monto);
+        x+=" · baja tu próxima facturación";
+        if(fa!==null){x=` · ${money(p.monto)} · <span style="color:var(--bad)">débito insuficiente (disponible ${money(fa)})</span>`;$("add").disabled=true}
+        else x+=sd===null?" · sale de Débito":` · débito quedará en ${money(sd-p.monto)}`;
+      }
       $("prev").innerHTML=`<b>${esc(p.desc||t)}</b>${x}`;
-    }else $("prev").textContent=payA==="Crédito"?"Escribe el monto. Se descuenta de tu débito y suma cupo al crédito.":"Escribe el monto que ingresó a tu cuenta de débito.";
+    }else $("prev").textContent=payA==="Crédito"?"Escribe el monto. Se descuenta de tu débito, suma cupo y baja tu próxima facturación.":"Escribe el monto que ingresó a tu cuenta de débito.";
     return;
   }
   if(!manualCat)$("cat").value=guess(p.desc);
@@ -384,6 +402,8 @@ function refreshPrev(){
     const n=cuotasSel(p), d=fechaSel();
     let extra="";
     if(n>1){const g={ts:d.getTime(),monto:p.monto,cuotas:n,pago:"Crédito"};extra=` · ${n} cuotas de ${money(Math.floor(p.monto/n))} · 1ª el ${fmtD(primeraFact(g))}`}
+    const fa=faltante(pay,d.getTime(),p.monto);
+    if(fa!==null){extra+=` · <span style="color:var(--bad)">${pay==="Débito"?"saldo":"cupo"} insuficiente (disponible ${money(fa)})</span>`;$("add").disabled=true}
     $("prev").innerHTML=`<b>${esc(p.desc||"Sin detalle")}</b> · ${money(p.monto)}${extra}`;
   }else $("prev").textContent="Escribe qué compraste y cuánto. Para cuotas: «en 6 cuotas».";
 }
@@ -401,8 +421,8 @@ function agregarAbono(){
   if(!cfg[payA].set)return toast(`Primero fija el pozo de ${payA}`);
   if(payA==="Crédito"){
     if(!cfg["Débito"].set)return toast("Primero fija el pozo de Débito");
-    const sd=saldo("Débito");
-    if(sd-p.monto<0&&!confirm(`Tu saldo de débito quedaría en ${money(sd-p.monto)}. ¿Continuar?`))return;
+    const fa=faltante("Débito",fechaSel().getTime(),p.monto);
+    if(fa!==null)return toast(`Débito insuficiente: tienes ${money(fa)}`,3000);
   }
   abonos.push({id:Date.now()+"",ts:fechaSel().getTime(),pago:payA,monto:p.monto,nota:p.desc,dd:payA==="Crédito"});
   save("abonos",abonos);
@@ -414,6 +434,8 @@ function agregar(){
   const p=parse($("q").value);
   if(!(p.monto>0))return;
   const cat=$("cat").value, d=fechaSel(), n=cuotasSel(p);
+  const fa=faltante(pay,d.getTime(),p.monto);
+  if(fa!==null)return toast(`${pay==="Débito"?"Saldo":"Cupo"} insuficiente: tienes ${money(fa)}`,3000);
   if(manualCat&&p.desc)learn[norm(p.desc).trim()]=cat;
   gastos.push({id:Date.now()+""+Math.random().toString(36).slice(2,5),ts:d.getTime(),desc:p.desc||"Sin detalle",cat,pago:pay,monto:p.monto,cuotas:n});
   save("gastos",gastos);save("learn",learn);
@@ -473,21 +495,18 @@ $("lst").onchange=e=>{
 
 // ---- Cuotas
 function renderCuotas(){
-  const now=new Date(), all=[];
-  gastos.filter(g=>g.pago==="Crédito").forEach(g=>cuotasDe(g).forEach(c=>all.push({g,...c})));
-  const pend=all.filter(c=>c.fecha>now), nx=proxFact(), inNx=pend.filter(c=>+c.fecha===+nx);
+  const now=new Date(), nx=proxFact();
+  const SP=facturaciones().filter(s=>s.f>now), N=SP.find(s=>+s.f===+nx)||{bruto:0,neto:0,sin:0,cuo:0};
   const diff=Math.round((new Date(nx.getFullYear(),nx.getMonth(),nx.getDate())-new Date(now.getFullYear(),now.getMonth(),now.getDate()))/864e5);
+  const cuando=diff===0?"Hoy":diff===1?"Mañana":`En ${diff} días`;
   $("cn-l").textContent=`Próxima facturación · ${fmtD(nx)}`;
-  $("cn-t").textContent=money(sumBy(inNx));
-  const sinC=sumBy(inNx.filter(c=>c.n===1)), enC=sumBy(inNx.filter(c=>c.n>1));
-  $("cn-s").textContent=(diff===0?"Hoy":diff===1?"Mañana":`En ${diff} días`)+(inNx.length?` · ${money(enC)} en cuotas, ${money(sinC)} sin cuotas`:" · Nada por facturar");
-  $("cp-t").textContent=money(sumBy(pend));
+  $("cn-t").textContent=money(N.neto);
+  $("cn-s").textContent=!N.bruto?`${cuando} · Nada por facturar`:N.bruto>N.neto?`${cuando} · facturado ${money(N.bruto)} − abonos ${money(N.bruto-N.neto)}`:`${cuando} · ${money(N.cuo)} en cuotas, ${money(N.sin)} sin cuotas`;
+  $("cp-t").textContent=money(sumBy(SP,s=>s.neto));
   $("cp-f").textContent="día "+FACT();
   $("fact").value=FACT();
-  // proyección
-  const mm={};pend.forEach(c=>{const k=c.fecha.getFullYear()*12+c.fecha.getMonth();(mm[k]=mm[k]||{f:c.fecha,t:0,n:0}).t+=c.monto;mm[k].n++});
-  const ms=Object.values(mm).sort((a,b)=>a.f-b.f), mx=Math.max(1,...ms.map(x=>x.t));
-  $("proj").innerHTML=ms.length?ms.map((x,i)=>`<div class="cb"><div class="r${i===0?" main":""}"><span>${fmtD(x.f)} ${x.f.getFullYear()}</span><span>${money(x.t)}</span></div><div class="b ${i===0?"w":"c"}"><i style="width:${x.t/mx*100}%"></i></div></div>`).join(""):`<div class="empty">No tienes cuotas pendientes.</div>`;
+  const mx=Math.max(1,...SP.map(s=>s.neto));
+  $("proj").innerHTML=SP.length?SP.map((s,i)=>`<div class="cb"><div class="r${i===0?" main":""}"><span>${fmtD(s.f)} ${s.f.getFullYear()}</span><span>${s.bruto>s.neto?`<span class="mut" style="font-size:12px">de ${money(s.bruto)} · </span>`:""}${money(s.neto)}</span></div><div class="b ${i===0?"w":"c"}"><i style="width:${s.neto/mx*100}%"></i></div></div>`).join(""):`<div class="empty">No tienes cuotas pendientes.</div>`;
   // compras en cuotas
   const act=[],fin=[];
   gastos.filter(g=>g.pago==="Crédito"&&(g.cuotas||1)>1).forEach(g=>{const cs=cuotasDe(g),paid=cs.filter(c=>c.fecha<=now).length;(paid<cs.length?act:fin).push({g,cs,paid})});
@@ -527,7 +546,10 @@ function renderResumen(){
 $("per2").onchange=renderResumen;
 $("abl").onclick=e=>{
   const b=e.target.closest(".x button");if(!b)return;
-  if(confirm("¿Borrar este abono?")){abonos=abonos.filter(a=>a.id!==b.closest("[data-ab]").dataset.ab);save("abonos",abonos);render()}
+  if(!confirm("¿Borrar este abono?"))return;
+  const antes=abonos;abonos=abonos.filter(a=>a.id!==b.closest("[data-ab]").dataset.ab);
+  if(["Débito","Crédito"].some(p=>{const s=saldo(p);return s!==null&&s<0})){abonos=antes;return toast("No se puede borrar: dejaría un saldo negativo",3000)}
+  save("abonos",abonos);render();
 };
 
 function render(){renderSaldos();recientes();renderGastos();renderCuotas();renderResumen();refreshPrev()}
@@ -561,6 +583,7 @@ $("file").onchange=async e=>{
 };
 
 applyTheme();render();tab(load("tab","reg"));
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
 if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
 </body>
